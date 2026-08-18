@@ -96,6 +96,15 @@ describe("hasSolarChannel", () => {
   });
 });
 
+describe("slots", () => {
+  it("files instances under a room: first slot is a required zone slot", () => {
+    const first = createRecipe().slots[0];
+    expect(first.id).toBe("zone");
+    expect(first.type).toBe("zone");
+    expect(first.required).toBe(true);
+  });
+});
+
 describe("validate", () => {
   const recipe = createRecipe();
 

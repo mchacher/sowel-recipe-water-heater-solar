@@ -42,6 +42,15 @@ export function createRecipe() {
         description: "Heats your water heater on solar surplus through its dedicated solar contact, coordinated by the energy arbiter.",
         slots: [
             {
+                // Convention: the room the automation is filed under. The UI files each
+                // instance in this zone; without it the instance is shown in no room.
+                id: "zone",
+                name: "Room",
+                description: "The room this automation is filed under.",
+                type: "zone",
+                required: true,
+            },
+            {
                 id: "heater",
                 name: "Water heater",
                 description: "The water heater (or switch) whose dedicated solar contact is closed on surplus.",
@@ -55,6 +64,10 @@ export function createRecipe() {
                 name: "Chauffe-eau sur surplus solaire",
                 description: "Chauffe le chauffe-eau sur le surplus solaire via son contact solaire dédié, coordonné par l'arbitre d'énergie.",
                 slots: {
+                    zone: {
+                        name: "Pièce",
+                        description: "La pièce sous laquelle l'automatisation est classée.",
+                    },
                     heater: {
                         name: "Chauffe-eau",
                         description: "Le chauffe-eau (ou l'interrupteur) dont le contact solaire dédié est fermé sur le surplus.",
