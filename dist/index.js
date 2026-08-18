@@ -38,7 +38,7 @@ export function hasSolarChannel(orderBindings) {
 export function createRecipe() {
     return {
         id: "water-heater-solar",
-        name: "Water Heater Solar",
+        name: "Water Heater on Solar Surplus",
         description: "Heats your water heater on solar surplus through its dedicated solar contact, coordinated by the energy arbiter.",
         slots: [
             {
@@ -52,7 +52,7 @@ export function createRecipe() {
         ],
         i18n: {
             fr: {
-                name: "Chauffe-eau solaire",
+                name: "Chauffe-eau sur surplus solaire",
                 description: "Chauffe le chauffe-eau sur le surplus solaire via son contact solaire dédié, coordonné par l'arbitre d'énergie.",
                 slots: {
                     heater: {

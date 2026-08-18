@@ -1,6 +1,6 @@
 {
   "name": "sowel-recipe-water-heater-solar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sowel recipe: Water Heater Solar — drive a water heater's solar contact on solar surplus via the energy arbiter",
   "type": "module",
   "main": "dist/index.js",
