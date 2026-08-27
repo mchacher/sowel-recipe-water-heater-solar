@@ -44,3 +44,15 @@ npm install
 npm run build   # tsc -> dist/
 npm test        # vitest
 ```
+
+## Giving the surplus back once the tank is hot (v0.2.0, #2)
+
+The claim used to be permanent: the water heater always wants free surplus. That is right while the tank heats and wrong once its thermostat has cut off, because the arbiter keeps **reserving** the heater's watts and that surplus reaches neither the water heater nor any lower-priority load. On a sunny afternoon the tank is hot early and the reservation stands for the rest of the day.
+
+The recipe stays blind to the tank temperature, as it always has: the appliance is driven through a dry contact and reports nothing back. It watches the load's own **measured draw** instead, which is a different question and the one a reservation should follow. Once that draw has sat at essentially zero for **30 minutes** under a grant with the contact closed, the claim is released and the contact opened; the appliance falls back to its own programming, exactly as it does on a revoke. A cooling-off period then keeps the next tick from taking the surplus straight back, and it **doubles on each consecutive release** (capped at four hours, reset the moment the heater draws again): a flat one would settle into a permanent 60-min-free / 30-min-reserved cycle on a tank that is hot for the afternoon, each re-claim preempting whatever load took the freed surplus only to hand it back half an hour later.
+
+Only a **live numeric** reading counts. A binding whose device has never published carries `null`, a cloud-API load reports its on/off state under the alias `power`, and a clamp that drops off the network freezes its last value: read as zero, any of those would open the contact on a cold tank and lock the recipe out. Anything that is not a number, or is older than two minutes, reads as unknown.
+
+A heater with **no power channel** keeps the previous behaviour exactly: no measurement, no release. Silence is never read as "the tank is hot".
+
+The trade-off is deliberate and worth knowing: releasing means losing your place in the priority queue, so a load that takes the freed surplus may hold it under its own anti-short-cycle window when the tank cools. This trades a certain, permanent waste against an occasional delay.

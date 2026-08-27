@@ -2,7 +2,7 @@
   "id": "water-heater-solar",
   "type": "recipe",
   "name": "Water Heater on Solar Surplus",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Heats your water heater on solar surplus through its dedicated solar contact, coordinated by the energy arbiter. Off-peak heating stays owned by the appliance.",
   "icon": "Sun",
   "repo": "mchacher/sowel-recipe-water-heater-solar",
