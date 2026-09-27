@@ -48,6 +48,13 @@ const IDLE_POWER_W = 20;
  *  by a shower is back to a one-hour wait, not a four-hour one. */
 const HOT_RECLAIM_COOLDOWN_MS = 60 * 60_000;
 const HOT_RECLAIM_COOLDOWN_MAX_MS = 4 * 60 * 60_000;
+/** Issue #6 — how long the heater must draw without a break, under one grant,
+ *  for it to count as a real heat (the tank was drawn down, a shower) rather
+ *  than a top-up. Measured on the reference installation: a tank left at 62 C
+ *  loses a degree or two an hour and tops up in 10-13 min at each re-claim. A
+ *  top-up must not reset the cooldown, or the doubling never happens: every
+ *  probe finds a few degrees to recover and the cycle stays at one hour. */
+const REAL_HEAT_MS = 30 * 60_000;
 /** How old a reading may be and still count as a measurement. Mirrors the
  *  core's own `LIVE_DRAW_FRESH_MS`: past it the value is the last thing the
  *  device said, not what it is doing. */
@@ -83,6 +90,20 @@ export function readDraw(bindings, now = Date.now()) {
     if (!Number.isFinite(at) || now - at > DRAW_FRESH_MS)
         return null;
     return b.value;
+}
+/**
+ * Issue #6 — the slack to claim with. `none` (the default) keeps the heater's
+ * place in the priority list, preemption included. Once the tank has been
+ * found hot today, a claim is only a top-up and asks with `some`: served after
+ * every `none` claim and never preempting one, so a 10-min top-up cannot stop a
+ * load that is running. A new day starts with a real heat again.
+ */
+export function claimSlack(hotDay, today) {
+    return hotDay === today ? "some" : "none";
+}
+/** Local calendar day, the unit the "tank already hot today" flag lives in. */
+export function localDay(at = Date.now()) {
+    return new Date(at).toDateString();
 }
 /** True when the equipment exposes a solar command channel (spec 152): an order
  * binding aliased `solar` or tagged `solar_toggle`. */
@@ -160,13 +181,23 @@ export function createRecipe() {
             /** Issue #2 — the cooldown to apply on the next hot release; doubles per
              *  consecutive release, resets as soon as the heater draws again. */
             let hotCooldownMs = HOT_RECLAIM_COOLDOWN_MS;
+            /** Issue #6 — since when the heater has drawn without a break under the
+             *  current grant. Null = idle, or nothing measured yet. */
+            let drawingSince = null;
+            /** Issue #6 — the local day on which the tank was last found hot. While
+             *  it is today, claims are top-ups (slack `some`). */
+            let hotDay = null;
+            /** The slack the live claim was made with. */
+            let claimedSlack = "none";
             /** Whether the recipe currently has the solar contact closed. */
             let contactClosed = false;
             const dispatchSolar = (on) => {
                 const previous = contactClosed;
                 contactClosed = on;
-                if (!on)
+                if (!on) {
                     idleSince = null;
+                    drawingSince = null;
+                }
                 ctx.dispatchOrder(heaterId, SOLAR_ALIAS, on ? "ON" : "OFF").catch((err) => {
                     // The order never left: put the belief back rather than carry a
                     // contact we think is open while it is closed, which after a release
@@ -197,10 +228,12 @@ export function createRecipe() {
                 const energy = ctx.helpers.energy;
                 if (!energy || !arbiterEnabled())
                     return; // inert — the appliance's own programming assures
+                const slack = claimSlack(hotDay, localDay());
                 try {
                     const handle = energy.claimCapacity({
                         equipmentId: heaterId,
-                        note: "water heater on solar surplus",
+                        slack,
+                        note: slack === "none" ? "water heater on solar surplus" : "water heater top-up on solar surplus",
                         onGranted: () => {
                             if (stopped)
                                 return;
@@ -232,6 +265,7 @@ export function createRecipe() {
                     }
                     lastDenied = null;
                     claim = handle ?? null;
+                    claimedSlack = slack;
                 }
                 catch (err) {
                     ctx.logger.error({ err }, "water-heater-solar: claimCapacity failed");
@@ -264,17 +298,25 @@ export function createRecipe() {
             const watchIdle = () => {
                 if (!claim || claim.status() !== "granted" || !contactClosed) {
                     idleSince = null;
+                    drawingSince = null;
                     return;
                 }
                 const draw = readDraw(ctx.equipmentManager.getDataBindingsWithValues?.(heaterId));
                 if (draw === null)
                     return; // unknown, never idle
+                const now = Date.now();
                 if (draw >= IDLE_POWER_W) {
                     idleSince = null;
-                    hotCooldownMs = HOT_RECLAIM_COOLDOWN_MS; // it heats again: start over
+                    drawingSince ??= now;
+                    // Issue #6 — only a real heat starts over. A top-up of a few minutes
+                    // is the tank recovering its standing loss, not a drawn-down tank.
+                    if (now - drawingSince >= REAL_HEAT_MS) {
+                        hotCooldownMs = HOT_RECLAIM_COOLDOWN_MS;
+                        hotDay = null;
+                    }
                     return;
                 }
-                const now = Date.now();
+                drawingSince = null;
                 if (idleSince === null) {
                     idleSince = now;
                     return;
@@ -290,6 +332,7 @@ export function createRecipe() {
                 }
                 claim = null;
                 idleSince = null;
+                hotDay = localDay(now);
                 holdOffUntil = Date.now() + hotCooldownMs;
                 hotCooldownMs = Math.min(hotCooldownMs * 2, HOT_RECLAIM_COOLDOWN_MAX_MS);
                 // Open the contact with the claim: leaving it closed would let the tank
@@ -297,11 +340,32 @@ export function createRecipe() {
                 // would rightly read as an unmanaged run.
                 dispatchSolar(false);
             };
+            /**
+             * Issue #6 — a claim still pending with the slack of another situation is
+             * re-made with the right one. Typically the top-up claim made in the
+             * afternoon, still pending the next morning: the first heat of the day
+             * gets its priority back. And the reverse, a pending `none` claim once the
+             * tank is known hot. A granted claim is never touched.
+             */
+            const refreshSlack = () => {
+                if (!claim || claim.status() !== "pending")
+                    return;
+                if (claimSlack(hotDay, localDay()) === claimedSlack)
+                    return;
+                try {
+                    claim.release();
+                }
+                catch {
+                    /* a broken handle must not break the tick */
+                }
+                claim = null;
+            };
             const timer = setInterval(() => {
                 try {
                     if (stopped)
                         return;
                     watchIdle();
+                    refreshSlack();
                     ensureClaim();
                 }
                 catch (err) {

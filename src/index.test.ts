@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createRecipe, hasSolarChannel, readDraw } from "./index.js";
+import { claimSlack, createRecipe, hasSolarChannel, readDraw } from "./index.js";
 
 // ============================================================
 // Fake RecipeContext harness
@@ -7,6 +7,7 @@ import { createRecipe, hasSolarChannel, readDraw } from "./index.js";
 
 interface ClaimReq {
   equipmentId: string;
+  slack?: "none" | "some" | "high";
   note?: string;
   onGranted: () => void;
   onRevoked: (reason: string) => void;
@@ -451,5 +452,156 @@ describe("readDraw (#2)", () => {
 
   it("keeps a negative reading (a bidirectional clamp) rather than dropping it", () => {
     expect(readDraw(fresh(-30))).toBe(-30);
+  });
+});
+
+// ============================================================
+// Issue #6 — a top-up never preempts, and never resets the cooldown
+// ============================================================
+
+describe("claimSlack (#6)", () => {
+  it("claims with the heater's priority until the tank is found hot today", () => {
+    expect(claimSlack(null, "Mon Sep 28 2026")).toBe("none");
+    expect(claimSlack("Sun Sep 27 2026", "Mon Sep 28 2026")).toBe("none");
+    expect(claimSlack("Mon Sep 28 2026", "Mon Sep 28 2026")).toBe("some");
+  });
+});
+
+describe("createInstance — top-ups after the tank is hot (#6)", () => {
+  const MIN = 60_000;
+  const HOUR = 3600_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Morning, so a test never straddles midnight by accident.
+    vi.setSystemTime(new Date(2026, 8, 28, 9, 0, 0));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  /** Grant, draw for `heatMin`, then sit idle until the recipe releases. */
+  function heatThenRelease(h: ReturnType<typeof makeCtx>, heatMin: number): void {
+    const releasedBefore = h.getReleased();
+    h.grant();
+    h.setDraw(650);
+    vi.advanceTimersByTime(heatMin * MIN);
+    h.setDraw(0);
+    vi.advanceTimersByTime(32 * MIN);
+    expect(h.getReleased()).toBe(releasedBefore + 1);
+  }
+
+  /** Advance minute by minute until a new claim appears; returns the wait. */
+  function waitForClaim(h: ReturnType<typeof makeCtx>, maxMin: number): number {
+    const before = h.getClaimCount();
+    for (let m = 1; m <= maxMin; m++) {
+      vi.advanceTimersByTime(MIN);
+      if (h.getClaimCount() > before) return m;
+    }
+    return -1;
+  }
+
+  it("claims the first heat of the day with its priority, then top-ups with slack", () => {
+    const h = makeCtx({ arbiterEnabled: true, metered: true, draw: 0 });
+    const inst = createRecipe().createInstance({ heater: HEATER }, h.ctx as never);
+    expect(h.getClaim()!.slack).toBe("none");
+
+    heatThenRelease(h, 90); // the morning heat to 62 C
+    expect(waitForClaim(h, 5 * 60)).toBeGreaterThan(0);
+    expect(h.getClaim()!.slack).toBe("some");
+    inst.stop();
+  });
+
+  it("does not reset the cooldown on a short top-up, so it keeps doubling", () => {
+    // Production, 2026-09-22: every re-claim found 10-13 min of heating to do,
+    // which reset the cooldown to one hour and made the doubling dead code.
+    const h = makeCtx({ arbiterEnabled: true, metered: true, draw: 0 });
+    const inst = createRecipe().createInstance({ heater: HEATER }, h.ctx as never);
+
+    heatThenRelease(h, 90);
+    const first = waitForClaim(h, 5 * 60);
+    heatThenRelease(h, 12);
+    const second = waitForClaim(h, 5 * 60);
+    heatThenRelease(h, 12);
+    const third = waitForClaim(h, 5 * 60);
+
+    expect(first).toBeGreaterThanOrEqual(59);
+    expect(first).toBeLessThanOrEqual(61);
+    expect(second).toBeGreaterThanOrEqual(119);
+    expect(second).toBeLessThanOrEqual(121);
+    expect(third).toBeGreaterThanOrEqual(239);
+    expect(third).toBeLessThanOrEqual(241);
+    inst.stop();
+  });
+
+  it("a real heat (a shower) resets the cooldown to one hour", () => {
+    const h = makeCtx({ arbiterEnabled: true, metered: true, draw: 0 });
+    const inst = createRecipe().createInstance({ heater: HEATER }, h.ctx as never);
+
+    heatThenRelease(h, 90);
+    waitForClaim(h, 5 * 60);
+    heatThenRelease(h, 12);
+    waitForClaim(h, 5 * 60); // cooldown now at 2 h, next would be 4 h
+
+    heatThenRelease(h, 40); // the tank was drawn down
+    const wait = waitForClaim(h, 5 * 60);
+    expect(wait).toBeGreaterThanOrEqual(59);
+    expect(wait).toBeLessThanOrEqual(61);
+    // It ended hot again, so the next claim is a top-up once more.
+    expect(h.getClaim()!.slack).toBe("some");
+    inst.stop();
+  });
+
+  it("a real heat cut short by a revoke gets its priority back", () => {
+    const h = makeCtx({ arbiterEnabled: true, metered: true, draw: 0 });
+    const inst = createRecipe().createInstance({ heater: HEATER }, h.ctx as never);
+
+    heatThenRelease(h, 90);
+    waitForClaim(h, 5 * 60);
+    expect(h.getClaim()!.slack).toBe("some");
+
+    // A top-up grant turns out to be a drawn-down tank, then a cloud passes.
+    h.grant();
+    h.setDraw(650);
+    vi.advanceTimersByTime(35 * MIN);
+    h.revoke("surplus-deficit");
+    const released = h.getReleased();
+    vi.advanceTimersByTime(2 * MIN);
+
+    expect(h.getReleased()).toBe(released + 1);
+    expect(h.getClaim()!.slack).toBe("none");
+    inst.stop();
+  });
+
+  it("re-makes a top-up claim still pending the next morning with its priority", () => {
+    const h = makeCtx({ arbiterEnabled: true, metered: true, draw: 0 });
+    const inst = createRecipe().createInstance({ heater: HEATER }, h.ctx as never);
+
+    heatThenRelease(h, 90);
+    waitForClaim(h, 5 * 60);
+    expect(h.getClaim()!.slack).toBe("some");
+    const released = h.getReleased();
+
+    // Pending through the evening and the night, never granted.
+    vi.setSystemTime(new Date(2026, 8, 29, 7, 0, 0));
+    vi.advanceTimersByTime(2 * MIN);
+
+    expect(h.getReleased()).toBe(released + 1);
+    expect(h.getClaim()!.slack).toBe("none");
+    inst.stop();
+  });
+
+  it("never touches a granted top-up claim", () => {
+    const h = makeCtx({ arbiterEnabled: true, metered: true, draw: 0 });
+    const inst = createRecipe().createInstance({ heater: HEATER }, h.ctx as never);
+
+    heatThenRelease(h, 90);
+    waitForClaim(h, 5 * 60);
+    h.grant();
+    h.setDraw(650);
+    const released = h.getReleased();
+
+    vi.setSystemTime(new Date(2026, 8, 29, 7, 0, 0));
+    vi.advanceTimersByTime(HOUR);
+    expect(h.getReleased()).toBe(released);
+    inst.stop();
   });
 });
