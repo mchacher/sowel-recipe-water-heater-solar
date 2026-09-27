@@ -7,11 +7,12 @@ interface CapacityClaimReq {
     equipmentId: string;
     watts?: number;
     toleratedImportW?: number;
-    slack?: "none" | "some" | "high";
+    slack?: CapacitySlack;
     note?: string;
     onGranted: () => void;
     onRevoked: (reason: string) => void;
 }
+type CapacitySlack = "none" | "some" | "high";
 interface CapacityHandle {
     id: string;
     status(): "pending" | "granted" | "denied" | "released";
@@ -119,6 +120,16 @@ export declare function readDraw(bindings: readonly {
     value: unknown;
     lastUpdated?: string | null;
 }[] | undefined, now?: number): number | null;
+/**
+ * Issue #6 — the slack to claim with. `none` (the default) keeps the heater's
+ * place in the priority list, preemption included. Once the tank has been
+ * found hot today, a claim is only a top-up and asks with `some`: served after
+ * every `none` claim and never preempting one, so a 10-min top-up cannot stop a
+ * load that is running. A new day starts with a real heat again.
+ */
+export declare function claimSlack(hotDay: string | null, today: string): CapacitySlack;
+/** Local calendar day, the unit the "tank already hot today" flag lives in. */
+export declare function localDay(at?: number): string;
 /** True when the equipment exposes a solar command channel (spec 152): an order
  * binding aliased `solar` or tagged `solar_toggle`. */
 export declare function hasSolarChannel(orderBindings: readonly OrderBindingLite[]): boolean;

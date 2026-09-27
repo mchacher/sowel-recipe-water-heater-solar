@@ -60,3 +60,14 @@ Only a **live numeric** reading counts. A binding whose device has never publish
 A heater with **no power channel** keeps the previous behaviour exactly: no measurement, no release. Silence is never read as "the tank is hot".
 
 The trade-off is deliberate and worth knowing: releasing means losing your place in the priority queue, so a load that takes the freed surplus may hold it under its own anti-short-cycle window when the tank cools. This trades a certain, permanent waste against an occasional delay.
+
+## A top-up never stops another load (v0.3.0, #6)
+
+Measured on the reference installation over five days: once the tank had reached 62 C in the morning, the recipe re-claimed about once an hour for the rest of the day. Each time the tank had lost a degree or two and heated for 10-13 minutes, and each time the claim, at the water heater's place in the priority list, preempted the pool heat pump running below it. That pump needs 1.85 kW of surplus to start, which the afternoon rarely offers again, so it stayed off until the next morning: three times in five days, for a top-up worth about 0.15 kWh.
+
+Two changes, and the morning heat is untouched:
+
+- **Once the tank has been found hot today, a claim is a top-up** and asks with slack `some`. The arbiter serves it after every load claiming at full priority and never lets it preempt one, so it heats on surplus nobody else is using. Once granted it behaves exactly as before. A new day starts with a full-priority claim again, and a top-up claim still pending the next morning is re-made with full priority.
+- **Only a real heat resets the cooldown.** The cooldown was meant to double on each consecutive hot release, but it reset whenever the heater drew at all, and every top-up draws, so it never got past one hour. It now resets only after 30 minutes of uninterrupted draw, the mark of a tank that was actually drawn down (a shower). The same event gives a claim interrupted mid-heat its full priority back.
+
+The baseline is unchanged: the appliance's own off-peak programming keeps the water at 55 C whatever the recipe does.
